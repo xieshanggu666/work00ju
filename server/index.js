@@ -40,6 +40,7 @@ import {
   initFlowContext, refreshForecastSnapshots, settleForecastLearning,
   runReconcile, listFindings, ignoreFinding, closedLoopOverview, reconcileStats
 } from './flow.js'
+import { initRideContext, upgradeRide } from './rides.js'
 
 const app = express()
 app.use(express.json())
@@ -113,6 +114,8 @@ initSchedulingContext({
 
 // 会员与权益中心：时钟 / 现金 / 财务流水
 initMemberContext({ logFinance })
+// 设施域服务：时钟 / 现金 / 财务流水（升级扣款与流水同事务原子提交）
+initRideContext({ logFinance })
 // 预约 ↔ 会员双向联动：预约侧注入会员报价/下单/退款回调；会员侧绑定会员模拟下单入口
 initReservationContext({
   quoteReservation: (...args) => memberQuote(...args),
@@ -987,6 +990,13 @@ app.post('/api/rides/:id', (req, res) => {
     return res.json(r)
   }
 
+  // 升级刺激度：输入严格校验（拒绝负数/0/非数），扣款 + 财务流水 + 属性提升同一事务原子提交
+  if (b.upgrade !== undefined) {
+    const r = upgradeRide(id, b.upgrade)
+    if (!r.ok) return res.status(r.status || 400).json({ ok: false, code: r.code, msg: r.msg, reqId: req.reqId })
+    return res.json({ ok: true, cost: r.cost, thrill: r.thrill, attr: r.attr, cash: r.cash, reqId: req.reqId })
+  }
+
   const sets = []
   const vals = []
   if (b.status) {
@@ -997,17 +1007,6 @@ app.post('/api/rides/:id', (req, res) => {
   }
   if (b.price) { sets.push('price=?'); vals.push(num(b.price)) }
   if (b.name) { sets.push('name=?'); vals.push(b.name) }
-  if (b.thrill && b.upgrade) {
-    // 升级刺激度花成本提升吸引度
-    const up = num(b.upgrade, 0)
-    sets.push('thrill=thrill+?'); vals.push(up)
-    sets.push('attr=attr+?'); vals.push(up * 0.3)
-    let cash = state.cash()
-    const cost = up * 3000
-    cash -= cost
-    setSetting('cash', Math.round(cash))
-    logFinance(state.day(), '升级', -cost, `升级设施 #${id}`)
-  }
   if (!sets.length) return res.json({ ok: false, msg: '无更新项' })
   vals.push(id)
   // 设施开放/停运与分时预约联动同一事务提交：停运强制退款在途预约，恢复重新开放时段；

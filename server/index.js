@@ -40,6 +40,7 @@ import {
   initFlowContext, refreshForecastSnapshots, settleForecastLearning,
   runReconcile, listFindings, ignoreFinding, closedLoopOverview, reconcileStats
 } from './flow.js'
+import { initRideContext, upgradeRide } from './rides.js'
 
 const app = express()
 app.use(express.json())
@@ -88,6 +89,8 @@ function logFinance(day, label, amount, detail) {
   db.prepare('INSERT INTO finance(tick,day,label,amount,detail) VALUES(?,?,?,?,?)')
     .run(state.tick(), day, label, Math.round(amount), detail || '')
 }
+
+initRideContext({ logFinance })
 
 // 分时预约模块共享：时钟 / 现金 / 财务流水 / 投诉建单
 initReservationContext({
@@ -987,6 +990,17 @@ app.post('/api/rides/:id', (req, res) => {
     return res.json(r)
   }
 
+  if (b.upgrade !== undefined) {
+    try {
+      const r = upgradeRide(id, b.upgrade)
+      if (!r.ok) return res.status(400).json(r)
+      return res.json(r)
+    } catch (e) {
+      console.error(`[rides] 设施 #${id} 升级失败，已整体回滚 [${req.reqId}]:`, e)
+      return res.status(500).json({ ok: false, code: 'TX_FAILED', msg: '设施升级失败，本次操作未生效，请稍后重试', reqId: req.reqId })
+    }
+  }
+
   const sets = []
   const vals = []
   if (b.status) {
@@ -997,17 +1011,6 @@ app.post('/api/rides/:id', (req, res) => {
   }
   if (b.price) { sets.push('price=?'); vals.push(num(b.price)) }
   if (b.name) { sets.push('name=?'); vals.push(b.name) }
-  if (b.thrill && b.upgrade) {
-    // 升级刺激度花成本提升吸引度
-    const up = num(b.upgrade, 0)
-    sets.push('thrill=thrill+?'); vals.push(up)
-    sets.push('attr=attr+?'); vals.push(up * 0.3)
-    let cash = state.cash()
-    const cost = up * 3000
-    cash -= cost
-    setSetting('cash', Math.round(cash))
-    logFinance(state.day(), '升级', -cost, `升级设施 #${id}`)
-  }
   if (!sets.length) return res.json({ ok: false, msg: '无更新项' })
   vals.push(id)
   // 设施开放/停运与分时预约联动同一事务提交：停运强制退款在途预约，恢复重新开放时段；
